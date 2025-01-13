@@ -13,13 +13,13 @@ import (
 type Store struct {
 }
 
+// 实现将哈希值和验证码存储到数据库或其他存储中
 func (s *Store) Set(hash, code string) error {
-	// 在这里实现将哈希值和验证码存储到数据库或其他存储中
 	return nil
 }
 
+// 实现从数据库或其他存储中获取哈希值对应的验证码
 func (s *Store) Get(hash string) (string, error) {
-	// 在这里实现从数据库或其他存储中获取哈希值对应的验证码
 	return "", nil
 }
 

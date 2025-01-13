@@ -2,6 +2,8 @@
 
 ## 快速开始
 
+详见：example\main.go
+
 ```go
 package main
 
@@ -18,13 +20,13 @@ import (
 type Store struct {
 }
 
+// 实现将哈希值和验证码存储到数据库或其他存储中
 func (s *Store) Set(hash, code string) error {
-	// 在这里实现将哈希值和验证码存储到数据库或其他存储中
 	return nil
 }
 
+// 实现从数据库或其他存储中获取哈希值对应的验证码
 func (s *Store) Get(hash string) (string, error) {
-	// 在这里实现从数据库或其他存储中获取哈希值对应的验证码
 	return "", nil
 }
 
@@ -32,7 +34,7 @@ func main() {
 	// 创建一个新的 Captcha 实例
 	captchaInstance := captcha.NewCaptcha(&Store{})
 
-	// 启动一个简单的 HTTP 服务器来显示验证码图片
+	// 验证码图片
 	// 浏览器访问：http://localhost:8080/captcha
 	http.HandleFunc("/captcha", func(w http.ResponseWriter, r *http.Request) {
 		// 生成验证码哈希值和图片base64编码
@@ -67,5 +69,4 @@ func main() {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }
-
 ```
