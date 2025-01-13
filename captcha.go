@@ -15,19 +15,44 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang/freetype"
 	"github.com/golang/freetype/truetype"
-	"github.com/gomodule/redigo/redis"
 	"golang.org/x/image/font"
 	"golang.org/x/image/math/fixed"
 )
 
-const (
-	fontDir = "./fonts/"
+var (
+	rng         *rand.Rand
+	rngMutex    sync.Mutex
+	rngInitOnce sync.Once
 )
 
+func init() {
+	rngInitOnce.Do(func() {
+		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	})
+}
+
+// 获取指定范围内的随机整数
+func randomInt(min, max int) int {
+	rngMutex.Lock()
+	defer rngMutex.Unlock()
+	if max < min {
+		min, max = max, min
+	}
+	return rng.Intn(max-min+1) + min
+}
+
+// 验证码存储接口
+type StoreInterface interface {
+	Set(hash, code string) error
+	Get(hash string) (string, error)
+}
+
+// 验证码
 type Captcha struct {
 	// 验证码字符集合
 	codeSet string
@@ -45,12 +70,12 @@ type Captcha struct {
 	imageH int
 	// 验证码图片宽度
 	imageW int
-	// 字体
-	font *truetype.Font
+	// 验证码存储对象
+	store StoreInterface
 }
 
-func NewCaptcha() *Captcha {
-	rand.Seed(time.Now().UnixNano())
+// 创建新的验证码对象
+func NewCaptcha(store StoreInterface) *Captcha {
 	return &Captcha{
 		codeSet:  "2345678abcdefhijkmnpqrstuvwxyzABCDEFGHJKLMNPQRTUVWXY",
 		fontSize: 29,
@@ -58,46 +83,57 @@ func NewCaptcha() *Captcha {
 		useNoise: true,
 		length:   4,
 		bg:       [3]int{243, 251, 254},
+		store:    store,
 	}
 }
 
-func (c *Captcha) GenerateImageBase64() (string, string, error) {
-	// 设置随机字体
-	err := c.setRandomFont()
+// 校验
+func (c *Captcha) Check(hash, code string) (res bool, err error) {
+	rawCode, err := c.store.Get(hash)
 	if err != nil {
-		return "", "", err
+		return
 	}
-	code := c.generateCode()
+	return rawCode != "" && rawCode == code, nil
+}
 
-	// 图片宽(px)
+// 生成验证码
+// 返回：hash值、验证码图片base64
+func (c *Captcha) Generate() (hash string, imgBase64 string, err error) {
+	// 获取随机字体
+	ft, err := c.getRandomFont()
+	if err != nil {
+		return
+	}
+	// 生成code码
+	hash, code := c.generateCode()
+	// 计算图片宽高
 	c.imageW = int(float64(c.length)*float64(c.fontSize)*1.5) + c.length*c.fontSize/2
-	// 图片高(px)
 	c.imageH = int(float64(c.fontSize) * 2.5)
 
 	img := image.NewRGBA(image.Rect(0, 0, c.imageW, c.imageH))
 	bgColor := color.RGBA{uint8(c.bg[0]), uint8(c.bg[1]), uint8(c.bg[2]), 255}
 	draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
 
-	face := truetype.NewFace(c.font, &truetype.Options{
+	face := truetype.NewFace(ft, &truetype.Options{
 		Size: float64(c.fontSize),
 	})
-
-	color := color.RGBA{uint8(rand.Intn(150)), uint8(rand.Intn(150)), uint8(rand.Intn(150)), 255}
-
+	// 验证码字体随机颜色
+	color := color.RGBA{uint8(randomInt(1, 150)), uint8(randomInt(1, 150)), uint8(randomInt(1, 150)), 255}
+	// 绘制杂点
 	if c.useNoise {
-		c.writeNoise(img)
+		c.writeNoise(img, ft)
 	}
+	// 绘制曲线
 	if c.useCurve {
 		c.writeCurve(img, color)
 		c.writeCurve(img, color)
-		c.writeCurve(img, color)
 	}
-
-	text := strings.Split(code.value, "")
+	// 绘制验证码
+	text := strings.Split(code, "")
 	for index, char := range text {
-		x := int(float64(c.fontSize)*float64(index+1)*1.5) + rand.Intn(10)
-		y := c.fontSize + rand.Intn(20)
-		angle := float64(rand.Intn(80)-40) * (3.1415926 / 180.0)
+		x := int(float64(c.fontSize)*float64(index+1)*1.5) + randomInt(1, 10)
+		y := c.fontSize + randomInt(10, 20)
+		angle := float64(randomInt(-40, 40)) * (3.1415926 / 180.0)
 
 		c.drawText(img, face, color, x, y, angle, char)
 	}
@@ -105,36 +141,47 @@ func (c *Captcha) GenerateImageBase64() (string, string, error) {
 	var buf bytes.Buffer
 	err = png.Encode(&buf, img)
 	if err != nil {
-		return "", "", err
+		return
+	}
+	// 保存验证码
+	err = c.store.Set(hash, code)
+	if err != nil {
+		return
 	}
 
-	return base64.StdEncoding.EncodeToString(buf.Bytes()), code.hash, nil
+	imgBase64 = base64.StdEncoding.EncodeToString(buf.Bytes())
+	return
 }
 
-// 设置随机字体
-func (c *Captcha) setRandomFont() error {
-	files, err := filepath.Glob(filepath.Join(fontDir, "*.ttf"))
+// 获取随机字体
+func (c *Captcha) getRandomFont() (*truetype.Font, error) {
+	files, err := filepath.Glob("./fonts/*.ttf")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(files) == 0 {
-		return fmt.Errorf("no font files found in %s", fontDir)
+		return nil, fmt.Errorf("no font files found in")
 	}
-	fontPath := files[rand.Intn(len(files))]
+	fontPath := files[randomInt(0, len(files)-1)]
 	fontBytes, err := os.ReadFile(fontPath)
 	if err != nil {
-		return fmt.Errorf("error reading font file: %v", err)
+		return nil, fmt.Errorf("error reading font file: %v", err)
 	}
-	font, err := truetype.Parse(fontBytes)
+	ft, err := truetype.Parse(fontBytes)
 	if err != nil {
-		return fmt.Errorf("error parsing font: %v [fontPath]=%s", err, fontPath)
+		return nil, fmt.Errorf("error parsing font: %v [fontPath]=%s", err, fontPath)
 	}
-	fmt.Println("fontPath:%s\r\n", fontPath)
-	c.font = font
-	return nil
+	return ft, nil
 }
 
-func (c *Captcha) drawCurveSegment(img *image.RGBA, color color.Color, startX, endX int, amplitude, phaseShift, frequency float64) {
+// 绘制曲线
+func (c *Captcha) writeCurve(img *image.RGBA, color color.Color) {
+	amplitude := float64(randomInt(1, c.imageH/2))                                 // 振幅
+	phaseShift := float64(randomInt(c.imageH/2, c.imageH/4))                       //	频率偏移
+	frequency := 2 * math.Pi / float64(randomInt(1, c.imageW*2-c.imageH)+c.imageH) // 周期
+	startX := 0
+	endX := c.imageW
+
 	for px := startX; px <= endX; px++ {
 		py := int(amplitude*math.Sin(frequency*float64(px)+phaseShift) + float64(c.imageH)/2)
 		i := c.fontSize / 5
@@ -147,68 +194,28 @@ func (c *Captcha) drawCurveSegment(img *image.RGBA, color color.Color, startX, e
 	}
 }
 
-// 绘制曲线
-func (c *Captcha) writeCurve(img *image.RGBA, color color.Color) {
-	// 曲线前部分
-	amplitude1 := float64(c.RandIntInRange(1, c.imageH/2))
-	phaseShift1 := float64(c.RandIntInRange(-(c.imageH / 4), c.imageH/4))
-	frequency1 := 2 * math.Pi / float64(c.RandIntInRange(c.imageH, c.imageW*2))
-	startX1 := 0
-	// endX1 := c.RandIntInRange(c.imageW/2, c.imageW)
-	endX1 := c.imageW
-
-	c.drawCurveSegment(img, color, startX1, endX1, amplitude1, phaseShift1, frequency1)
-
-	// 曲线后部分
-	// amplitude2 := float64(c.RandIntInRange(1, c.imageH/2))
-	// phaseShift2 := float64(c.RandIntInRange(-(c.imageH / 4), c.imageH/4))
-	// frequency2 := 2 * math.Pi / float64(c.RandIntInRange(c.imageH, c.imageW*2))
-	// startX2 := endX1
-	// endX2 := c.imageW
-
-	// c.drawCurveSegment(img, color, startX2, endX2, amplitude2, phaseShift2, frequency2)
-}
-
-func (c *Captcha) writeNoise(img *image.RGBA) {
-	codeSet := "1234567890abcdefhijkmnpqrstuvwxyz"
+// 绘制杂点
+func (c *Captcha) writeNoise(img *image.RGBA, ft *truetype.Font) {
 	for i := 0; i < 10; i++ {
-		// 杂点颜色
-		noiseColor := color.RGBA{uint8(c.RandIntInRange(150, 255)), uint8(c.RandIntInRange(150, 255)), uint8(c.RandIntInRange(150, 255)), 255}
+		noiseColor := color.RGBA{uint8(randomInt(150, 225)), uint8(randomInt(150, 225)), uint8(randomInt(150, 225)), 255}
 		for j := 0; j < 5; j++ {
-			// 绘杂点
-			c.drawStringOnImage(img, string(codeSet[rand.Intn(len(codeSet))]), 18, c.RandIntInRange(-10, c.imageW), c.RandIntInRange(-10, c.imageH), noiseColor)
+			c.drawStringOnImage(img, ft, string(c.codeSet[randomInt(0, len(c.codeSet)-1)]), 18, randomInt(-10, c.imageW), randomInt(-10, c.imageH), noiseColor)
 		}
 	}
-
 }
 
-func (c *Captcha) RandIntInRange(min, max int) int {
-	// 确保 max >= min，否则交换它们
-	if max < min {
-		min, max = max, min
-	}
-	// 计算范围大小
-	rangeSize := max - min + 1
-	// 使用 rand.Intn 生成一个 0 到 rangeSize-1 之间的随机整数
-	randomInt := rand.Intn(rangeSize)
-	// 将随机整数映射到 min 到 max 的范围内
-	return randomInt + min
-}
-
-func (c *Captcha) drawStringOnImage(img *image.RGBA, text string, fontSize float64, x, y int, textColor color.Color) error {
-	// 设置字体上下文
+// 绘制字符串在图片上
+func (c *Captcha) drawStringOnImage(img *image.RGBA, ft *truetype.Font, text string, fontSize float64, x, y int, textColor color.Color) error {
 	ctx := freetype.NewContext()
 	ctx.SetDPI(72)
-	ctx.SetFont(c.font)
+	ctx.SetFont(ft)
 	ctx.SetFontSize(fontSize)
 	ctx.SetClip(img.Bounds())
 	ctx.SetDst(img)
 	ctx.SetSrc(image.NewUniform(textColor))
 
-	// 将字符串位置转换为 fixed.Point26_6 类型
 	pt := fixed.P(x, y+int(ctx.PointToFixed(fontSize)>>6))
 
-	// 绘制字符串
 	_, err := ctx.DrawString(text, pt)
 	if err != nil {
 		return fmt.Errorf("error drawing string: %w", err)
@@ -217,6 +224,7 @@ func (c *Captcha) drawStringOnImage(img *image.RGBA, text string, fontSize float
 	return nil
 }
 
+// 绘制文字
 func (c *Captcha) drawText(img *image.RGBA, face font.Face, color color.Color, x, y int, angle float64, text string) {
 	d := &font.Drawer{
 		Dst:  img,
@@ -227,67 +235,14 @@ func (c *Captcha) drawText(img *image.RGBA, face font.Face, color color.Color, x
 	d.DrawString(text)
 }
 
-func (c *Captcha) generateCode() struct {
-	value string
-	hash  string
-} {
+// 生成验证码
+func (c *Captcha) generateCode() (string, string) {
 	characters := strings.Split(c.codeSet, "")
-	bag := ""
+	code := ""
 	for i := 0; i < c.length; i++ {
-		bag += characters[rand.Intn(len(characters))]
+		code += characters[randomInt(0, len(characters)-1)]
 	}
 
-	hash := fmt.Sprintf("%x", md5.Sum([]byte(strconv.FormatInt(time.Now().UnixNano(), 10)+randString(10)+bag)))
-	conn, err := redis.Dial("tcp", ":6379")
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close()
-
-	conn.Do("SETEX", c.getRedisKey(hash), 300, bag)
-
-	return struct {
-		value string
-		hash  string
-	}{value: bag, hash: hash}
-}
-
-func (c *Captcha) getRedisKey(hash string) string {
-	return "yunj.library.captcha:" + hash
-}
-
-func (c *Captcha) Check(code, hash string) bool {
-	conn, err := redis.Dial("tcp", ":6379")
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close()
-
-	redisCode, err := redis.String(conn.Do("GET", c.getRedisKey(hash)))
-	if err != nil {
-		return false
-	}
-
-	res := strings.ToLower(redisCode) == strings.ToLower(code)
-	if res {
-		conn.Do("DEL", c.getRedisKey(hash))
-	}
-	return res
-}
-
-func randString(n int) string {
-	const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letterBytes[rand.Intn(len(letterBytes))]
-	}
-	return string(b)
-}
-
-func msectime() int64 {
-	return time.Now().UnixNano() / int64(time.Millisecond)
-}
-
-func sin(x float64) float64 {
-	return math.Sin(x)
+	hash := fmt.Sprintf("%x", md5.Sum([]byte(strconv.FormatInt(time.Now().UnixNano(), 10)+code)))
+	return hash, code
 }
