@@ -1,5 +1,9 @@
 # 图片验证码
 
+示例：
+
+![](./imgs/image.png)
+
 ## 快速开始
 
 详见：example\main.go
