@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"embed"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -87,7 +88,7 @@ func NewCaptcha(store StoreInterface) *Captcha {
 	// 加载字体数据
 	fontNums := []string{"1", "2", "3", "5", "6"}
 	trueTypeFontSlice := make([]*truetype.Font, len(fontNums))
-	for _, num := range fontNums {
+	for i, num := range fontNums {
 		fileName := fmt.Sprintf("fonts/%s.ttf", num)
 		fontBytes, err := defaultEmbeddedFontsFS.ReadFile(fileName)
 		if err != nil {
@@ -97,7 +98,10 @@ func NewCaptcha(store StoreInterface) *Captcha {
 		if err != nil {
 			panic(fmt.Sprintf("Font file %s parse exception!%v", fileName, err))
 		}
-		trueTypeFontSlice = append(trueTypeFontSlice, trueTypeFont)
+		if trueTypeFont == nil {
+			panic(fmt.Sprintf("Font file %s parse exception2!", fileName))
+		}
+		trueTypeFontSlice[i] = trueTypeFont
 	}
 
 	return &Captcha{
@@ -125,7 +129,16 @@ func (c *Captcha) Check(hash, code string) (res bool, err error) {
 // 返回：hash值、验证码图片base64
 func (c *Captcha) Generate() (hash string, imgBase64 string, err error) {
 	// 获取随机字体
-	ft := c.trueTypeFontSlice[randomInt(0, len(c.trueTypeFontSlice)-1)]
+	if len(c.trueTypeFontSlice) == 0 {
+		err = errors.New("no fonts available")
+		return
+	}
+	fontIndex := randomInt(0, len(c.trueTypeFontSlice)-1)
+	ft := c.trueTypeFontSlice[fontIndex]
+	if ft == nil {
+		err = fmt.Errorf("font at index %d is nil", fontIndex)
+		return
+	}
 	// 生成code码
 	hash, code := c.generateCode()
 	// 计算图片宽高
