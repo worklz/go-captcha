@@ -3,6 +3,7 @@ package captcha
 import (
 	"bytes"
 	"crypto/md5"
+	"embed"
 	"encoding/base64"
 	"fmt"
 	"image"
@@ -46,6 +47,11 @@ func randomInt(min, max int) int {
 	return rng.Intn(max-min+1) + min
 }
 
+// 嵌入字体资源
+//
+//go:embed fonts/*.ttf
+var defaultEmbeddedFontsFS embed.FS
+
 // 验证码存储接口
 type StoreInterface interface {
 	Set(hash, code string) error
@@ -72,18 +78,37 @@ type Captcha struct {
 	imageW int
 	// 验证码存储对象
 	store StoreInterface
+	// 字体
+	trueTypeFontSlice []*truetype.Font
 }
 
 // 创建新的验证码对象
 func NewCaptcha(store StoreInterface) *Captcha {
+	// 加载字体数据
+	fontNums := []string{"1", "2", "3", "5", "6"}
+	trueTypeFontSlice := make([]*truetype.Font, len(fontNums))
+	for _, num := range fontNums {
+		fileName := fmt.Sprintf("fonts/%s.ttf", num)
+		fontBytes, err := defaultEmbeddedFontsFS.ReadFile(fileName)
+		if err != nil {
+			panic(fmt.Sprintf("Font file %s read exception!%v", fileName, err))
+		}
+		trueTypeFont, err := freetype.ParseFont(fontBytes)
+		if err != nil {
+			panic(fmt.Sprintf("Font file %s parse exception!%v", fileName, err))
+		}
+		trueTypeFontSlice = append(trueTypeFontSlice, trueTypeFont)
+	}
+
 	return &Captcha{
-		codeSet:  "2345678abcdefhijkmnpqrstuvwxyzABCDEFGHJKLMNPQRTUVWXY",
-		fontSize: 29,
-		useCurve: true,
-		useNoise: true,
-		length:   4,
-		bg:       [3]int{243, 251, 254},
-		store:    store,
+		codeSet:           "2345678abcdefhijkmnpqrstuvwxyzABCDEFGHJKLMNPQRTUVWXY",
+		fontSize:          29,
+		useCurve:          true,
+		useNoise:          true,
+		length:            4,
+		bg:                [3]int{243, 251, 254},
+		store:             store,
+		trueTypeFontSlice: trueTypeFontSlice,
 	}
 }
 
@@ -100,10 +125,7 @@ func (c *Captcha) Check(hash, code string) (res bool, err error) {
 // 返回：hash值、验证码图片base64
 func (c *Captcha) Generate() (hash string, imgBase64 string, err error) {
 	// 获取随机字体
-	ft, err := c.getRandomFont()
-	if err != nil {
-		return
-	}
+	ft := c.trueTypeFontSlice[randomInt(0, len(c.trueTypeFontSlice)-1)]
 	// 生成code码
 	hash, code := c.generateCode()
 	// 计算图片宽高
