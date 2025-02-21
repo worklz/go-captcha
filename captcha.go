@@ -122,7 +122,7 @@ func (c *Captcha) Check(hash, code string) (res bool, err error) {
 	if err != nil {
 		return
 	}
-	return rawCode != "" && rawCode == code, nil
+	return rawCode != "" && strings.EqualFold(rawCode, code), nil
 }
 
 // 生成验证码
